@@ -372,7 +372,11 @@ function buildGameOverDetails(game: Chess): GameOverDetails {
   }
 }
 
-export default function ChessGame() {
+type ChessGameProps = {
+  newGameRequest: number
+}
+
+export default function ChessGame({ newGameRequest }: ChessGameProps) {
   const chessRef = useRef(new Chess())
   const workerRef = useRef<Worker | null>(null)
   const boardWrapRef = useRef<HTMLDivElement | null>(null)
@@ -555,6 +559,12 @@ export default function ChessGame() {
     setStatusMessage(engineReady ? 'New game - you move first' : 'Preparing tutor...')
     sendEngineCommand('ucinewgame')
   }
+
+  useEffect(() => {
+    // Request 0 is the initial load, which may restore a saved game. Every
+    // subsequent request comes from the New Game button and starts afresh.
+    if (newGameRequest > 0) startNewGame()
+  }, [newGameRequest])
 
   const analyzeFen = async (fenToAnalyze: string): Promise<StockfishAnalysis> => {
     if (!engineReady || !workerRef.current) {

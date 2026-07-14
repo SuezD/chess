@@ -12,14 +12,14 @@ The app teaches chess through full games, immediate feedback, and reviewing mist
 
 The app has only two screens:
 
-1. Play Game
+1. New Game
 2. Review Mistakes
 
 Do not add additional screens unless explicitly requested.
 
 ---
 
-# Play Game Screen
+# New Game Screen
 
 This is the main application screen.
 
@@ -176,7 +176,7 @@ Show a game over modal.
 
 Actions:
 
-- Play Game
+- New Game
 - Review Mistakes
 
 ---

@@ -1,323 +1,290 @@
-Project: Personal Chess Learning Trainer (Mobile Web App)
+# AGENTS.md
 
-Goal
+## Project: Chess Tutor
 
-Build a personal chess practice app designed around my preferred learning style:
+A minimal mobile-first chess tutor web app.
 
-* I learn best through immediate feedback.
-* I do not retain mistakes from post-game analysis alone.
-* I want to learn through full games first, not random chess puzzles.
-* The app should identify recurring mistakes and deliberately create practice opportunities for those mistakes.
+The app teaches chess through full games, immediate feedback, and reviewing mistakes.
 
-The goal is not to build a chess platform. The goal is to build a personal adaptive tutor.
+---
 
-⸻
+# Screens
 
-Core Learning Loop
+The app has only two screens:
 
-The user flow should be:
+1. Play Game
+2. Review Mistakes
 
-1. Start a full chess game against an easy bot.
-2. User makes moves normally.
-3. After each user move:
-    * Analyse whether the move is a meaningful mistake.
-    * If yes, pause the game.
-    * Explain the mistake in beginner-friendly language.
-    * Allow the user to retry or continue.
-4. Record the mistake type.
-5. Later create practice games/positions that repeat the same concept.
+Do not add additional screens unless explicitly requested.
 
-⸻
+---
 
-Version 1 Scope (keep simple)
+# Play Game Screen
 
-Must have
+This is the main application screen.
 
-1. Mobile chess board
+Layout:
 
-Requirements:
+- Button to start a new game
+- Button to navigate to Review Mistakes
+- Chess board
+- Tutor panel below the board
 
-* Designed primarily for phone screens.
-* Large board.
-* Touch-friendly.
-* Drag pieces or tap-to-move.
 
-Use an existing chessboard component rather than building one.
+Nothing else should appear during normal gameplay.
+Everything should fit on a single page (no vertical or horizontal scrolling needed)
 
-Recommended:
+No:
+- ratings
+- statistics
+- dashboards
+- move history
+- captured pieces
+- opening information
+- leaderboards
 
-* react-chessboard for the UI. It provides a responsive React chessboard component with mobile support.
-    * https://www.npmjs.com/package/react-chessboard
+---
 
-⸻
+# Chess Board
 
-2. Chess rules engine
+Use existing chess libraries.
 
-Use chess.js.
+Do not implement chess rules or a custom chess board.
 
-Responsibilities:
+Preferred:
 
-* Validate legal moves.
-* Track game state.
-* Generate FEN positions.
-* Detect check/checkmate/stalemate.
+- react-chessboard for board UI
+- chess.js for chess state and legal moves
+- Stockfish for bot decisions
 
-Do not implement chess rules manually.
+The user controls only their own pieces.
 
-Reference:
+The opponent pieces are controlled by the bot.
 
-* https://www.npmjs.com/package/chess.js
+---
 
-⸻
+# Gameplay
 
-3. Computer opponent
+Every game is a complete chess game.
 
-Use Stockfish.
+The user does not play puzzles or isolated positions during normal play.
 
-The bot should initially play intentionally weak chess.
+Starting a new game resets the current game.
 
-Difficulty levels:
+Early progression:
+- User always plays White.
 
-* Level 1: makes obvious mistakes.
-* Level 2: plays basic chess.
-* Level 3: stronger.
+Later progression:
+- User learns Black as well.
 
-Do not expose Elo initially.
+The condition for switching colours must be based on stored user progress.
 
-Reference:
+Do not add this until a clear progression rule exists.
 
-* https://github.com/official-stockfish/Stockfish
+---
 
-⸻
+# Bot
 
-Mistake Detection
+The opponent is always a bot.
 
-Do not show raw engine evaluations.
+Bot difficulty is not selected by the user.
 
-Bad:
-“You lost 2.3 evaluation points.”
+The bot behaviour adapts based on user progress.
 
-Good:
-“You moved your knight and left your queen undefended.”
+The goal of the bot is to create learning opportunities, not simply maximise winning chances.
 
-Initial mistake categories:
+---
 
-Hanging pieces
+# Mistake Detection
+
+A mistake is a move that represents a clear learning opportunity.
+
+Do not interrupt for:
+- different opening choices
+- non-optimal engine moves
+- small evaluation changes
+- positional preferences
+
+Interrupt for:
+- losing a piece immediately
+- hanging a queen/rook/bishop/knight
+- missing a forced capture
+- allowing immediate checkmate
+- missing immediate checkmate
+- ignoring check
+- obvious tactical losses
+
+Mistake detection should prioritise teachable concepts over engine accuracy.
+
+---
+
+# Tutor Panel
+
+The tutor panel is always visible below the board.
+
+It provides passive information.
 
 Examples:
 
-* Leaving queen/rook/bishop/knight capturable.
-* Missing that opponent attacks a piece.
+Before a game:
 
-Ignoring threats
+"Focus: Piece Safety"
 
-Examples:
+During a game:
 
-* Opponent attacks queen.
-* Opponent threatens checkmate.
+"Look for threats before moving."
 
-Bad trades
+---
 
-Examples:
-
-* Trading when losing material.
-* Avoiding obvious winning trades.
-
-Missing free captures
-
-Moving pieces repeatedly instead of developing
-
-⸻
-
-Feedback UI
+# Mistake Modal
 
 When a mistake occurs:
 
-Show:
+Show a modal.
 
-⸻
+The modal contains:
 
-⚠️ Pause
+- Explanation/hint
+- Look Again button
+- Hint button
+- Show Answer button
+- Continue Anyway button
 
-Your move was legal, but there was a problem.
+Behaviour:
 
-You moved your bishop here.
+## Look Again
+Undo the user's mistake move.
 
-Your opponent can now:
+The user chooses another move.
 
-* capture it
-* win material
+## Hint
+Show a stronger hint.
 
-Before continuing:
+## Show Answer
+Show the recommended move and explanation.
 
-What did you miss?
+## Continue Anyway
+Continue the game from the mistake position.
 
-[Retry move]
+---
 
-[Show explanation]
+# Game Over
 
-⸻
+When checkmate occurs:
 
-Do not immediately reveal the answer.
+Show a game over modal.
 
-The user should think first.
+Actions:
 
-⸻
+- Play Game
+- Review Mistakes
 
-Learning Memory System
+---
+
+# User Progress
+
+Progress is stored in local storage.
+
+Progress determines:
+
+- tutor behaviour
+- bot behaviour
+- lessons shown
+
+Progress should be based on:
+
+- number of mistakes
+- mistake categories
+- successful avoidance of previous mistakes
+
+Do not use Elo.
+
+---
+
+# Mistake Storage
 
 Store mistakes locally.
 
-No backend needed initially.
+Each mistake should contain:
 
-Example:
+- game id
+- timestamp
+- FEN position before mistake
+- user's move
+- recommended move
+- mistake category
+- explanation
+- whether user has successfully reviewed it
 
-{
-mistakeType: “missed_knight_attack”,
-position: “FEN”,
-userMove: “Qd4”,
-bestMove: “Qe2”,
-date: “2026-07-13”,
-solved: false
-}
+---
 
-⸻
+# Review Mistakes Screen
 
-Practice Mode
+Purpose:
 
-Create a “Review my mistakes” mode.
+Allow users to practise previous mistakes.
 
-Instead of random puzzles:
+Show a list of mistakes.
 
-Generate scenarios based on previous games.
+Each item should contain:
 
-Example:
+- mistake type
+- short explanation
+- date
 
-The user repeatedly loses queens to knights.
+Each mistake has:
 
-Create:
+Practice button
 
-* Different board positions
-* Different openings
-* Same underlying skill
+---
 
-Goal:
+# Practice Mistakes
 
-Train recognition, not memorisation.
+Clicking Practice:
 
-⸻
+- Returns user to the chess board.
+- Loads the previous game state.
+- Places the user at the mistake position.
+- Allows them to continue the game from that point.
 
-Progression System
+The user should replay from the mistake rather than solve a static puzzle.
 
-Do not use rating as the main metric.
+---
 
-Track skills:
+# Mistake Retention
 
-Example:
+Initial implementation:
 
-Piece safety:
-⭐⭐⭐☆☆
+Keep all mistakes locally.
 
-Opening principles:
-⭐⭐☆☆☆
+Do not delete automatically.
 
-Tactics:
-⭐☆☆☆☆
+Future versions may introduce:
+- spaced repetition
+- solved mistakes
+- forgetting old mistakes
 
-Endgames:
-⭐⭐⭐☆☆
+---
 
-Only increase bot difficulty when the user consistently avoids major mistakes.
+# Technical Constraints
 
-⸻
+Mobile-first.
 
-Do NOT build initially
+Should work as a PWA.
 
-Avoid:
+Prefer offline functionality.
 
-* User accounts
-* Multiplayer
-* Friends
-* Leaderboards
-* Opening database
-* Puzzle database
-* Fancy animations
-* Social features
-* Backend
+Keep implementation simple.
 
-The app should work offline if possible.
+Avoid unnecessary dependencies.
 
-⸻
+---
 
-Suggested Tech Stack
+# Current Priority Order
 
-Frontend:
-
-* React + TypeScript
-* Vite
-* Tailwind CSS
-
-Chess:
-
-* chess.js
-* react-chessboard
-
-AI:
-
-* Stockfish running locally/in browser
-
-Storage:
-
-* LocalStorage initially
-
-Deployment:
-
-* GitHub Pages or Vercel
-
-⸻
-
-Development Milestones
-
-Milestone 1
-
-A mobile chess board where:
-
-* User plays against bot.
-* Game works.
-
-Milestone 2
-
-Add Stockfish analysis:
-
-* Detect bad moves.
-
-Milestone 3
-
-Add explanations:
-
-* Convert engine output into beginner language.
-
-Milestone 4
-
-Save mistakes.
-
-Milestone 5
-
-Generate personalised practice.
-
-⸻
-
-Design inspiration
-
-The UI should feel closer to:
-
-* Sudoku app
-* Duolingo skill progression
-* A chess coach sitting beside you
-
-Not:
-
-* Chess.com competitive interface
-
-The user should always know:
-“What am I learning from this move?”
+1. Complete chess game against bot
+2. Detect clear mistakes
+3. Show mistake modal
+4. Save mistakes
+5. Review mistakes
+6. Adapt tutor based on progress

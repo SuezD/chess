@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
+import GameOverModal from './GameOverModal'
 import MistakeModal from './MistakeModal'
 
 type StockfishAnalysis = {
@@ -33,6 +34,12 @@ type MistakeRecord = {
   explanation: string
   date: string
   resolved: boolean
+}
+
+type GameOverDetails = {
+  result: string
+  lesson: string
+  hint: string
 }
 
 const engineUrl = '/stockfish/stockfish-18-asm.js?engine=v2'
@@ -147,6 +154,52 @@ function parseHint(category: string, detail?: { square?: string; piece?: string;
     .replace('{targetSquare}', detail?.targetSquare || 'that square')
 }
 
+function buildGameOverDetails(game: Chess): GameOverDetails {
+  if (game.isCheckmate()) {
+    const winner = game.turn() === 'w' ? 'Black' : 'White'
+    const userWon = winner === 'White'
+    return {
+      result: `${winner} won by checkmate.`,
+      lesson: userWon
+        ? 'Nice finish. You converted the position by leaving the king with no legal escape.'
+        : 'Your king was checkmated. The useful lesson is to rewind the final threat and notice when the escape squares disappeared.',
+      hint: userWon
+        ? 'Which checking move removed the last safe square?'
+        : 'Before starting again, find the move where the mating threat became impossible to ignore.',
+    }
+  }
+
+  if (game.isStalemate()) {
+    return {
+      result: 'Draw by stalemate.',
+      lesson: 'The side to move had no legal moves, but the king was not in check.',
+      hint: 'When you are winning, leave the opponent one legal move unless you are giving checkmate.',
+    }
+  }
+
+  if (game.isInsufficientMaterial()) {
+    return {
+      result: 'Draw by insufficient material.',
+      lesson: 'There is not enough material left on the board for either side to force checkmate.',
+      hint: 'In simple endings, ask whether your remaining pieces can actually create mate.',
+    }
+  }
+
+  if (game.isThreefoldRepetition()) {
+    return {
+      result: 'Draw by repetition.',
+      lesson: 'The same position appeared three times, so the game is drawn.',
+      hint: 'If you are better, look for a new plan before repeating the same moves.',
+    }
+  }
+
+  return {
+    result: 'Game over.',
+    lesson: 'This game reached an ending condition.',
+    hint: 'Review the final position and name the main idea before starting the next game.',
+  }
+}
+
 export default function ChessGame() {
   const chessRef = useRef(new Chess())
   const workerRef = useRef<Worker | null>(null)
@@ -158,6 +211,8 @@ export default function ChessGame() {
   const [statusMessage, setStatusMessage] = useState('Preparing tutor...')
   const [gameOver, setGameOver] = useState(false)
   const [gameOverMessage, setGameOverMessage] = useState<string | null>(null)
+  const [gameOverDetails, setGameOverDetails] = useState<GameOverDetails | null>(null)
+  const [showGameOverModal, setShowGameOverModal] = useState(false)
   const [modal, setModal] = useState<ModalState | null>(null)
 
   function updateGameState(game = chessRef.current) {
@@ -166,8 +221,14 @@ export default function ChessGame() {
 
     if (!isOver) {
       setGameOverMessage(null)
+      setGameOverDetails(null)
+      setShowGameOverModal(false)
       return
     }
+
+    const details = buildGameOverDetails(game)
+    setGameOverDetails(details)
+    setShowGameOverModal(true)
 
     if (game.isCheckmate()) {
       setGameOverMessage('Checkmate — game over.')
@@ -285,6 +346,19 @@ export default function ChessGame() {
     workerRef.current?.postMessage(cmd)
   }
 
+  function startNewGame() {
+    chessRef.current.reset()
+    const nextFen = chessRef.current.fen()
+    setFen(nextFen)
+    setGameOver(false)
+    setGameOverMessage(null)
+    setGameOverDetails(null)
+    setShowGameOverModal(false)
+    setModal(null)
+    setStatusMessage(engineReady ? 'New game - you move first' : 'Preparing tutor...')
+    sendEngineCommand('ucinewgame')
+  }
+
   const analyzeFen = async (fenToAnalyze: string): Promise<StockfishAnalysis> => {
     if (!engineReady || !workerRef.current) {
       return {}
@@ -322,6 +396,7 @@ export default function ChessGame() {
     const choice = (safeMoves.length ? safeMoves : moves)[Math.floor(Math.random() * (safeMoves.length || moves.length))]
     chessRef.current.move({ from: choice.from, to: choice.to, promotion: 'q' })
     setFen(chessRef.current.fen())
+    updateGameState(chessRef.current)
   }
 
   function getHintText(category: string, detail?: { square?: string; piece?: string; targetSquare?: string }, stage = 1) {
@@ -414,10 +489,9 @@ export default function ChessGame() {
     setFen(afterFen)
     updateGameState(chessRef.current)
     if (chessRef.current.isGameOver()) {
-      setStatusMessage('Analyzing final position...')
-    } else {
-      setStatusMessage('Analyzing move...')
+      return
     }
+    setStatusMessage('Analyzing move...')
 
     const [beforeAnalysis, afterAnalysis] = await Promise.all([
       analyzeFen(beforeFen).catch(() => ({})),
@@ -503,6 +577,15 @@ export default function ChessGame() {
         <p>{gameOverMessage || statusMessage}</p>
         <p>FEN: {fen}</p>
       </div>
+      {showGameOverModal && gameOverDetails && !modal && (
+        <GameOverModal
+          result={gameOverDetails.result}
+          lesson={gameOverDetails.lesson}
+          hint={gameOverDetails.hint}
+          onNewGame={startNewGame}
+          onClose={() => setShowGameOverModal(false)}
+        />
+      )}
       {modal && (
         <MistakeModal
           category={modal.category}

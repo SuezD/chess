@@ -156,7 +156,40 @@ export default function ChessGame() {
   const [orientation] = useState<'white' | 'black'>('white')
   const [engineReady, setEngineReady] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Preparing tutor...')
+  const [gameOver, setGameOver] = useState(false)
+  const [gameOverMessage, setGameOverMessage] = useState<string | null>(null)
   const [modal, setModal] = useState<ModalState | null>(null)
+
+  function updateGameState(game = chessRef.current) {
+    const isOver = game.isGameOver()
+    setGameOver(isOver)
+
+    if (!isOver) {
+      setGameOverMessage(null)
+      return
+    }
+
+    if (game.isCheckmate()) {
+      setGameOverMessage('Checkmate — game over.')
+      setStatusMessage('Checkmate — game over.')
+      return
+    }
+
+    if (game.isStalemate()) {
+      setGameOverMessage('Stalemate — draw.')
+      setStatusMessage('Stalemate — draw.')
+      return
+    }
+
+    if (game.isInsufficientMaterial()) {
+      setGameOverMessage('Draw by insufficient material.')
+      setStatusMessage('Draw by insufficient material.')
+      return
+    }
+
+    setGameOverMessage('Game over.')
+    setStatusMessage('Game over.')
+  }
 
   useEffect(() => {
     try {
@@ -164,6 +197,7 @@ export default function ChessGame() {
       if (saved) {
         chessRef.current.load(saved)
         setFen(chessRef.current.fen())
+        updateGameState(chessRef.current)
       }
     } catch (e) {
       // ignore invalid saved FEN
@@ -276,6 +310,8 @@ export default function ChessGame() {
   }
 
   function generateBotMove() {
+    if (chessRef.current.isGameOver()) return
+
     const moves = chessRef.current.moves({ verbose: true })
     if (moves.length === 0) return
     const safeMoves = moves.filter(move => {
@@ -376,7 +412,12 @@ export default function ChessGame() {
 
     const afterFen = chessRef.current.fen()
     setFen(afterFen)
-    setStatusMessage('Analyzing move...')
+    updateGameState(chessRef.current)
+    if (chessRef.current.isGameOver()) {
+      setStatusMessage('Analyzing final position...')
+    } else {
+      setStatusMessage('Analyzing move...')
+    }
 
     const [beforeAnalysis, afterAnalysis] = await Promise.all([
       analyzeFen(beforeFen).catch(() => ({})),
@@ -414,6 +455,10 @@ export default function ChessGame() {
       return
     }
 
+    if (chessRef.current.isGameOver()) {
+      return
+    }
+
     setStatusMessage('Good move — continue playing')
     setTimeout(() => {
       if (!chessRef.current.isGameOver()) {
@@ -423,7 +468,7 @@ export default function ChessGame() {
   }
 
   function onPieceDrop({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string | null }) {
-    if (!targetSquare) return false
+    if (gameOver || !targetSquare) return false
 
     const before = new Chess(chessRef.current.fen())
     const validation = before.move({ from: sourceSquare, to: targetSquare, promotion: 'q' })
@@ -455,7 +500,7 @@ export default function ChessGame() {
       </div>
       <div className="status">
         <p>{engineReady ? 'Stockfish is ready.' : 'Loading engine...'}</p>
-        <p>{statusMessage}</p>
+        <p>{gameOverMessage || statusMessage}</p>
         <p>FEN: {fen}</p>
       </div>
       {modal && (

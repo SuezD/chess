@@ -8,7 +8,7 @@ export default function App() {
     <div className="app-root">
       <header className="app-header">
         <h1>Chess Trainer</h1>
-        <div style={{display:'flex',gap:8,marginTop:8}}>
+        <div className="app-navigation">
           <button onClick={() => setView('play')}>Play Game</button>
           <button onClick={() => setView('review')}>Review Mistakes</button>
         </div>

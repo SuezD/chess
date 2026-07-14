@@ -42,6 +42,22 @@ type GameOverDetails = {
   hint: string
 }
 
+type MistakeCategory = 'hanging_piece' | 'unsafe_capture' | 'missed_capture' | 'missed_mate' | 'allowing_checkmate'
+
+type DetectedMistake = {
+  category: MistakeCategory
+  severity: 1 | 2 | 3
+  confidence: number
+  alternativeFen?: string
+  alternativeMove?: string
+  evidence: {
+    square?: string
+    piece?: string
+    targetSquare?: string
+    opponentMove?: string
+  }
+}
+
 const engineUrl = '/stockfish/stockfish-18-asm.js?engine=v2'
 const engineDepth = 10
 const pieceValues: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9 }
@@ -49,6 +65,7 @@ const pieceValues: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9 }
 const categoryMap: Record<string, { label: string; concept: string }> = {
   bad_trade: { label: 'Bad trade', concept: 'Winning Material' },
   hanging_piece: { label: 'Hanging piece', concept: 'Piece Safety' },
+  unsafe_capture: { label: 'Unsafe capture', concept: 'Piece Safety' },
   missed_capture: { label: 'Missed capture', concept: 'Winning Material' },
   missed_mate: { label: 'Missed mate', concept: 'Simple Tactics' },
   allowing_checkmate: { label: 'Allowing mate', concept: 'Piece Safety' },
@@ -64,6 +81,11 @@ const hintTemplates: Record<string, string[]> = {
     'Look for pieces the opponent can capture next.',
     'Which one of your pieces is attacked and not defended?',
     'Your piece is hanging and can be taken on the next move.',
+  ],
+  unsafe_capture: [
+    'Before taking, check what your opponent can capture next.',
+    'Does your capture leave a more valuable piece exposed?',
+    'This capture loses more material than it wins.',
   ],
   missed_capture: [
     'Look at the captures available to you.',
@@ -106,43 +128,193 @@ function countMaterial(game: Chess, color: string) {
   }, 0)
 }
 
-function countAttackers(game: Chess, square: string, attackerColor: string) {
-  return game.moves({ square, verbose: true }).filter(m => m.color === attackerColor && (m.flags.includes('c') || m.flags.includes('e'))).length
+function opponentOf(color: string) {
+  return color === 'w' ? 'b' : 'w'
 }
 
-function findHangingPiece(game: Chess, color: string) {
-  const board = game.board()
-  for (let rank = 0; rank < 8; rank += 1) {
-    for (let file = 0; file < 8; file += 1) {
-      const square = 'abcdefgh'[file] + (8 - rank)
-      const piece = game.get(square)
-      if (!piece || piece.color !== color) continue
-      const attackers = countAttackers(game, square, color === 'w' ? 'b' : 'w')
-      const defenders = countAttackers(game, square, color)
-      if (attackers > 0 && defenders === 0) {
-        return { square, piece: pieceName(piece.type) }
+function isCapture(move: { flags: string }) {
+  return move.flags.includes('c') || move.flags.includes('e')
+}
+
+function playMove(game: Chess, move: { from: string; to: string; promotion?: string }) {
+  const next = new Chess(game.fen())
+  const promotion = move.promotion as 'n' | 'b' | 'r' | 'q' | undefined
+  next.move(promotion
+    ? { from: move.from, to: move.to, promotion }
+    : { from: move.from, to: move.to })
+  return next
+}
+
+function materialBalance(game: Chess, color: string) {
+  return countMaterial(game, color) - countMaterial(game, opponentOf(color))
+}
+
+function positionWithTurn(game: Chess, color: string) {
+  const fenParts = game.fen().split(' ')
+  fenParts[1] = color
+  return new Chess(fenParts.join(' '))
+}
+
+function bestImmediateRecovery(game: Chess, color: string) {
+  let bestBalance = materialBalance(game, color)
+  for (const move of game.moves({ verbose: true }).filter(isCapture)) {
+    bestBalance = Math.max(bestBalance, materialBalance(playMove(game, move), color))
+  }
+  return bestBalance
+}
+
+// This is intentionally only one opponent reply and one possible recapture. It
+// catches clear losses while avoiding a full engine search or a top-move comparison.
+function worstImmediateExchange(game: Chess, playerColor: string) {
+  const replies = game.moves({ verbose: true }).filter(isCapture)
+  let worstBalance = materialBalance(game, playerColor)
+  let worstMove: { from: string; to: string; captured?: string } | null = null
+
+  for (const reply of replies) {
+    const afterReply = playMove(game, reply)
+    const balanceAfterRecovery = bestImmediateRecovery(afterReply, playerColor)
+    if (!worstMove || balanceAfterRecovery < worstBalance) {
+      worstBalance = balanceAfterRecovery
+      worstMove = reply
+    }
+  }
+
+  return { balance: worstBalance, reply: worstMove }
+}
+
+function findMateInOne(game: Chess) {
+  for (const move of game.moves({ verbose: true })) {
+    if (playMove(game, move).isCheckmate()) return move
+  }
+  return null
+}
+
+function findUnsafeCapture(after: Chess, playerColor: string, balanceBefore: number): DetectedMistake | null {
+  const outcome = worstImmediateExchange(after, playerColor)
+  const materialLoss = balanceBefore - outcome.balance
+  if (!outcome.reply || materialLoss < 2) return null
+
+  return {
+    category: 'unsafe_capture',
+    severity: materialLoss >= 5 ? 3 : 2,
+    confidence: 0.9,
+    evidence: {
+      square: outcome.reply.to,
+      piece: pieceName(outcome.reply.captured || null),
+      opponentMove: `${outcome.reply.from}${outcome.reply.to}`,
+    },
+  }
+}
+
+function findNewHangingPiece(before: Chess, after: Chess, playerColor: string, balanceBefore: number): DetectedMistake | null {
+  const previouslyCapturableSquares = new Set(
+    positionWithTurn(before, opponentOf(playerColor)).moves({ verbose: true }).filter(isCapture).map(move => move.to)
+  )
+  const valuablePieces = new Set(['q', 'r', 'b', 'n'])
+  let strongest: DetectedMistake | null = null
+
+  for (const reply of after.moves({ verbose: true }).filter(isCapture)) {
+    if (!reply.captured || !valuablePieces.has(reply.captured) || previouslyCapturableSquares.has(reply.to)) continue
+
+    const afterReply = playMove(after, reply)
+    const loss = balanceBefore - bestImmediateRecovery(afterReply, playerColor)
+    if (loss < 2) continue
+
+    const severity: 2 | 3 = reply.captured === 'q' || loss >= 5 ? 3 : 2
+    if (!strongest || severity > strongest.severity) {
+      strongest = {
+        category: 'hanging_piece',
+        severity,
+        confidence: 0.9,
+        evidence: {
+          square: reply.to,
+          piece: pieceName(reply.captured),
+          opponentMove: `${reply.from}${reply.to}`,
+        },
       }
     }
   }
-  return null
+
+  return strongest
 }
 
-function findFreeCapture(game: Chess, color: string) {
-  const moves = game.moves({ verbose: true })
-  const captureMoves = moves
-    .filter(m => m.flags.includes('c') || m.flags.includes('e'))
-    .sort((a, b) => materialValue(b.captured?.type || '') - materialValue(a.captured?.type || ''))
+function findMissedFreeCapture(before: Chess, after: Chess, playerColor: string, balanceBefore: number) {
+  const valuablePieces = new Set(['q', 'r', 'b', 'n'])
+  const playedOutcome = worstImmediateExchange(after, playerColor)
+  const playedGain = playedOutcome.balance - balanceBefore
+  let best: DetectedMistake | null = null
 
-  for (const move of captureMoves) {
-    if (!move.captured) continue
-    const target = move.to
-    const defenderCount = countAttackers(game, target, move.piece === 'p' ? (color === 'w' ? 'b' : 'w') : (color === 'w' ? 'b' : 'w'))
-    if (defenderCount === 0) {
-      return { from: move.from, to: move.to, captured: move.captured }
+  for (const capture of before.moves({ verbose: true }).filter(isCapture)) {
+    if (!capture.captured || !valuablePieces.has(capture.captured)) continue
+
+    const candidatePosition = playMove(before, capture)
+    const outcome = worstImmediateExchange(candidatePosition, playerColor)
+    const gain = outcome.balance - balanceBefore
+    // A capture is only "missed" if it beats the move that was actually
+    // played. This prevents treating every favourable capture as mandatory.
+    if (gain < 2 || gain - playedGain < 2) continue
+
+    const severity: 2 | 3 = capture.captured === 'q' || gain >= 5 ? 3 : 2
+    if (!best || severity > best.severity) {
+      best = {
+        category: 'missed_capture',
+        severity,
+        confidence: 0.9,
+        alternativeFen: candidatePosition.fen(),
+        alternativeMove: `${capture.from}${capture.to}`,
+        evidence: {
+          targetSquare: capture.to,
+          piece: pieceName(capture.captured),
+        },
+      }
     }
   }
 
-  return null
+  return best
+}
+
+function describeMistake(mistake: DetectedMistake) {
+  const { evidence } = mistake
+  switch (mistake.category) {
+    case 'unsafe_capture':
+      return `That capture allows your opponent to take your ${evidence.piece || 'piece'} on ${evidence.square}. You lose more material than you win.`
+    case 'hanging_piece':
+      return `Your ${evidence.piece || 'piece'} on ${evidence.square} can be taken next move, and the exchange loses material.`
+    case 'missed_capture':
+      return `You could safely take the opponent's ${evidence.piece || 'piece'} on ${evidence.targetSquare}.`
+    case 'allowing_checkmate':
+      return 'Your opponent has a checkmate in one after this move.'
+    case 'missed_mate':
+      return 'You had a checkmate in one available.'
+  }
+}
+
+function engineConfirmsMaterialMistake(before: StockfishAnalysis, after: StockfishAnalysis) {
+  // UCI scores are from the side-to-move perspective. Before the move that is
+  // the player; after the move it is the opponent, so the latter is inverted.
+  if (after.mate !== undefined) return after.mate > 0
+  if (before.scoreCp === undefined || after.scoreCp === undefined) return true
+
+  const evaluationLoss = before.scoreCp - (-after.scoreCp)
+  return evaluationLoss >= 120
+}
+
+function scoreForPlayerWhenOpponentToMove(analysis: StockfishAnalysis) {
+  if (analysis.mate !== undefined) {
+    return analysis.mate > 0
+      ? -100_000 + analysis.mate
+      : 100_000 + analysis.mate
+  }
+  return analysis.scoreCp === undefined ? undefined : -analysis.scoreCp
+}
+
+function engineConfirmsMissedCapture(candidate: StockfishAnalysis, played: StockfishAnalysis) {
+  const candidateScore = scoreForPlayerWhenOpponentToMove(candidate)
+  const playedScore = scoreForPlayerWhenOpponentToMove(played)
+  // Missed captures are opportunity comparisons, so fail closed when the
+  // engine cannot validate both resulting positions.
+  if (candidateScore === undefined || playedScore === undefined) return false
+  return candidateScore - playedScore >= 150
 }
 
 function parseHint(category: string, detail?: { square?: string; piece?: string; targetSquare?: string }, stage = 1) {
@@ -203,10 +375,12 @@ function buildGameOverDetails(game: Chess): GameOverDetails {
 export default function ChessGame() {
   const chessRef = useRef(new Chess())
   const workerRef = useRef<Worker | null>(null)
+  const boardWrapRef = useRef<HTMLDivElement | null>(null)
   const analysisResolveRef = useRef<((analysis: StockfishAnalysis) => void) | null>(null)
   const isAnalyzingRef = useRef(false)
   const currentInfoRef = useRef<StockfishAnalysis>({})
   const [fen, setFen] = useState(chessRef.current.fen())
+  const [boardWidth, setBoardWidth] = useState(0)
   const [orientation] = useState<'white' | 'black'>('white')
   const [engineReady, setEngineReady] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -270,6 +444,27 @@ export default function ChessGame() {
   useEffect(() => {
     localStorage.setItem('chess:fen', fen)
   }, [fen])
+
+  useEffect(() => {
+    const element = boardWrapRef.current
+    if (!element) return
+
+    const updateBoardWidth = () => {
+      setBoardWidth(Math.floor(Math.min(480, element.clientWidth)))
+    }
+
+    updateBoardWidth()
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updateBoardWidth)
+    observer?.observe(element)
+    window.addEventListener('resize', updateBoardWidth)
+
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateBoardWidth)
+    }
+  }, [])
 
   useEffect(() => {
     if (typeof Worker === 'undefined') {
@@ -391,9 +586,12 @@ export default function ChessGame() {
     const moves = chessRef.current.moves({ verbose: true })
     if (moves.length === 0) return
     const safeMoves = moves.filter(move => {
-      const copy = new Chess(chessRef.current.fen())
-      copy.move({ from: move.from, to: move.to, promotion: 'q' })
-      return !findHangingPiece(copy, copy.turn())
+      const before = new Chess(chessRef.current.fen())
+      const copy = playMove(before, move)
+      const botColor = before.turn()
+      const balanceBefore = materialBalance(before, botColor)
+      const unsafeCapture = move.captured ? findUnsafeCapture(copy, botColor, balanceBefore) : null
+      return !unsafeCapture && !findNewHangingPiece(before, copy, botColor, balanceBefore)
     })
     const choice = (safeMoves.length ? safeMoves : moves)[Math.floor(Math.random() * (safeMoves.length || moves.length))]
     chessRef.current.move({ from: choice.from, to: choice.to, promotion: 'q' })
@@ -408,78 +606,36 @@ export default function ChessGame() {
   function detectMistake(
     beforeFen: string,
     afterFen: string,
-    userMove: { from: string; to: string },
-    beforeAnalysis: StockfishAnalysis,
-    afterAnalysis: StockfishAnalysis
+    userMove: { from: string; to: string; captured?: string }
   ) {
     const before = new Chess(beforeFen)
     const after = new Chess(afterFen)
     const color = before.turn()
-    const opponent = color === 'w' ? 'b' : 'w'
+    const balanceBefore = materialBalance(before, color)
+    const mistakes: DetectedMistake[] = []
 
-    const materialBefore = countMaterial(before, color)
-    const materialAfter = countMaterial(after, color)
-    if (materialAfter < materialBefore) {
-      return {
-        isMistake: true,
-        category: 'bad_trade',
-        explanation: 'Your move lost material. The tutor wants you to keep your pieces safe unless the trade improves your position.',
-        detail: { square: `${userMove.to}`, piece: 'piece' },
-      }
+    const missedMate = findMateInOne(before)
+    if (missedMate && `${missedMate.from}${missedMate.to}` !== `${userMove.from}${userMove.to}`) {
+      mistakes.push({ category: 'missed_mate', severity: 3, confidence: 1, evidence: {} })
     }
 
-    const hanging = findHangingPiece(after, color)
-    if (hanging) {
-      return {
-        isMistake: true,
-        category: 'hanging_piece',
-        explanation: `Your ${hanging.piece} on ${hanging.square} can be captured next move. Keep your pieces defended.`,
-        detail: { square: hanging.square, piece: hanging.piece },
-      }
+    if (findMateInOne(after)) {
+      mistakes.push({ category: 'allowing_checkmate', severity: 3, confidence: 1, evidence: {} })
     }
 
-    const freeCapture = findFreeCapture(before, color)
-    if (freeCapture && `${freeCapture.from}${freeCapture.to}` !== `${userMove.from}${userMove.to}`) {
-      return {
-        isMistake: true,
-        category: 'missed_capture',
-        explanation: `You had a free capture on ${freeCapture.to}. Look for undefended enemy pieces before you move.`,
-        detail: { targetSquare: freeCapture.to, piece: pieceName(freeCapture.captured.type) },
-      }
+    if (userMove.captured) {
+      const unsafeCapture = findUnsafeCapture(after, color, balanceBefore)
+      if (unsafeCapture) mistakes.push(unsafeCapture)
     }
 
-    if (afterAnalysis.mate && afterAnalysis.mate > 0) {
-      return {
-        isMistake: true,
-        category: 'allowing_checkmate',
-        explanation: 'Your opponent has a mate threat after this move. Try to keep your king safe and avoid leaving direct threats.',
-        detail: {},
-      }
-    }
+    const hangingPiece = findNewHangingPiece(before, after, color, balanceBefore)
+    if (hangingPiece) mistakes.push(hangingPiece)
 
-    if (beforeAnalysis.mate && beforeAnalysis.mate > 0 && beforeAnalysis.bestMove && `${beforeAnalysis.bestMove}` !== `${userMove.from}${userMove.to}`) {
-      return {
-        isMistake: true,
-        category: 'missed_mate',
-        explanation: 'There was a winning tactic available. The tutor wants you to spot quick finishes.',
-        detail: {},
-      }
-    }
+    const missedCapture = findMissedFreeCapture(before, after, color, balanceBefore)
+    if (missedCapture) mistakes.push(missedCapture)
 
-    if (beforeAnalysis.scoreCp !== undefined && beforeAnalysis.scoreCp >= 150 && beforeAnalysis.bestMove && `${beforeAnalysis.bestMove}` !== `${userMove.from}${userMove.to}`) {
-      // Only interrupt for clear mistakes, not small differences.
-      const scoreDelta = beforeAnalysis.scoreCp
-      if (scoreDelta >= 250) {
-        return {
-          isMistake: true,
-          category: 'bad_trade',
-          explanation: 'You missed a stronger move that would keep your position safer. The tutor focuses on clear mistakes, not small move preferences.',
-          detail: {},
-        }
-      }
-    }
-
-    return { isMistake: false }
+    mistakes.sort((a, b) => b.severity - a.severity || b.confidence - a.confidence)
+    return mistakes[0] || null
   }
 
   async function processUserMove(source: string, target: string) {
@@ -504,22 +660,45 @@ export default function ChessGame() {
       setIsAnalyzing(false)
     }
 
-    // Stockfish handles searches one at a time. A concurrent request overwrites
-    // analysisResolveRef and leaves the first Promise unresolved.
-    const beforeAnalysis = await analyzeFen(beforeFen).catch(() => ({}))
-    const afterAnalysis = await analyzeFen(afterFen).catch(() => ({}))
+    let result = detectMistake(beforeFen, afterFen, move)
+    if (
+      result &&
+      (result.category === 'hanging_piece' || result.category === 'unsafe_capture') &&
+      engineReady
+    ) {
+      // This validates the consequence of a tentative material loss. It does
+      // not compare the played move with Stockfish's preferred move.
+      const beforeAnalysis = await analyzeFen(beforeFen).catch(() => ({}))
+      const afterAnalysis = await analyzeFen(afterFen).catch(() => ({}))
+      if (!engineConfirmsMaterialMistake(beforeAnalysis, afterAnalysis)) {
+        result = null
+      }
+    }
 
-    const result = detectMistake(beforeFen, afterFen, move, beforeAnalysis, afterAnalysis)
-    if (result.isMistake) {
+    if (result?.category === 'missed_capture' && (!result.alternativeFen || !engineReady)) {
+      result = null
+    } else if (result?.category === 'missed_capture' && result.alternativeFen) {
+      // Both positions are after White's move, so Stockfish is evaluating from
+      // the same (opponent-to-move) perspective. This compares a concrete
+      // capture with the played move, never with Stockfish's top choice.
+      const captureAnalysis = await analyzeFen(result.alternativeFen).catch(() => ({}))
+      const playedAnalysis = await analyzeFen(afterFen).catch(() => ({}))
+      if (!engineConfirmsMissedCapture(captureAnalysis, playedAnalysis)) {
+        result = null
+      }
+    }
+
+    if (result && result.severity >= 2) {
       const categoryInfo = categoryMap[result.category] || { label: result.category, concept: 'Learning' }
+      const explanation = describeMistake(result)
       const record: MistakeRecord = {
         id: `${Date.now()}-${source}-${target}`,
         position: beforeFen,
         playedMove: `${move.from}${move.to}`,
-        bestMove: beforeAnalysis.bestMove || null,
+        bestMove: result.alternativeMove || null,
         mistakeCategory: categoryInfo.label,
         concept: categoryInfo.concept,
-        explanation: result.explanation,
+        explanation,
         date: new Date().toISOString(),
         resolved: false,
       }
@@ -528,11 +707,11 @@ export default function ChessGame() {
         beforeFen,
         afterFen,
         userMove: `${move.from}${move.to}`,
-        explanation: result.explanation,
+        explanation,
         bestMove: record.bestMove,
         category: result.category,
         concept: categoryInfo.concept,
-        detail: result.detail,
+        detail: result.evidence,
         hintStage: 0,
         showAnswer: false,
       })
@@ -574,16 +753,18 @@ export default function ChessGame() {
 
   return (
     <div className="game-container">
-      <div className="board-wrap">
+      <div className="board-wrap" ref={boardWrapRef}>
         <div className="board">
-          <Chessboard
-            options={{
-              position: fen,
-              boardOrientation: orientation,
-              onPieceDrop,
-              boardWidth: Math.min(480, Math.max(320, typeof window !== 'undefined' ? window.innerWidth - 40 : 480)),
-            }}
-          />
+          {boardWidth > 0 && (
+            <Chessboard
+              options={{
+                position: fen,
+                boardOrientation: orientation,
+                onPieceDrop,
+                boardWidth,
+              }}
+            />
+          )}
         </div>
       </div>
       <div className="status">

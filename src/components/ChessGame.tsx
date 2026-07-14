@@ -204,10 +204,12 @@ export default function ChessGame() {
   const chessRef = useRef(new Chess())
   const workerRef = useRef<Worker | null>(null)
   const analysisResolveRef = useRef<((analysis: StockfishAnalysis) => void) | null>(null)
+  const isAnalyzingRef = useRef(false)
   const currentInfoRef = useRef<StockfishAnalysis>({})
   const [fen, setFen] = useState(chessRef.current.fen())
   const [orientation] = useState<'white' | 'black'>('white')
   const [engineReady, setEngineReady] = useState(false)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Preparing tutor...')
   const [gameOver, setGameOver] = useState(false)
   const [gameOverMessage, setGameOverMessage] = useState<string | null>(null)
@@ -481,6 +483,8 @@ export default function ChessGame() {
   }
 
   async function processUserMove(source: string, target: string) {
+    if (isAnalyzingRef.current) return
+
     const beforeFen = chessRef.current.fen()
     const move = chessRef.current.move({ from: source, to: target, promotion: 'q' })
     if (move === null) return
@@ -493,10 +497,17 @@ export default function ChessGame() {
     }
     setStatusMessage('Analyzing move...')
 
-    const [beforeAnalysis, afterAnalysis] = await Promise.all([
-      analyzeFen(beforeFen).catch(() => ({})),
-      analyzeFen(afterFen).catch(() => ({})),
-    ])
+    isAnalyzingRef.current = true
+    setIsAnalyzing(true)
+    const finishAnalysis = () => {
+      isAnalyzingRef.current = false
+      setIsAnalyzing(false)
+    }
+
+    // Stockfish handles searches one at a time. A concurrent request overwrites
+    // analysisResolveRef and leaves the first Promise unresolved.
+    const beforeAnalysis = await analyzeFen(beforeFen).catch(() => ({}))
+    const afterAnalysis = await analyzeFen(afterFen).catch(() => ({}))
 
     const result = detectMistake(beforeFen, afterFen, move, beforeAnalysis, afterAnalysis)
     if (result.isMistake) {
@@ -526,10 +537,12 @@ export default function ChessGame() {
         showAnswer: false,
       })
       setStatusMessage('Mistake detected')
+      finishAnalysis()
       return
     }
 
     if (chessRef.current.isGameOver()) {
+      finishAnalysis()
       return
     }
 
@@ -538,11 +551,12 @@ export default function ChessGame() {
       if (!chessRef.current.isGameOver()) {
         generateBotMove()
       }
+      finishAnalysis()
     }, 300)
   }
 
   function onPieceDrop({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string | null }) {
-    if (gameOver || !targetSquare) return false
+    if (gameOver || isAnalyzing || !targetSquare) return false
 
     const before = new Chess(chessRef.current.fen())
     const validation = before.move({ from: sourceSquare, to: targetSquare, promotion: 'q' })
